@@ -1,0 +1,1606 @@
+`define silence   32'd50000000
+`define c   32'd262   // C3
+`define d   32'd294
+`define e   32'd330
+`define f   32'd349
+`define g   32'd392   // G3
+`define a   32'd440
+`define b   32'd494   // B3
+
+`define hc  32'd524   // C4
+`define hd  32'd588   // D4
+`define he  32'd660   // E4
+`define hf  32'd698   // F4
+`define hg  32'd784   // G4
+`define ha  32'd880
+`define hb  32'd988
+
+`define lc   32'd131   // C3
+`define ld   32'd147
+`define le   32'd165
+`define lf   32'd174
+`define lg   32'd196   // G3
+`define la   32'd220
+`define lb   32'd247
+
+`define sil   32'd50000000 // slience
+module final(
+    input clk,
+    input rst,
+    inout PS2_CLK,
+    inout PS2_DATA,
+    input echo,
+    input mode, //SWITCH 1: play, 0: normal
+    input door, //SWITCH 1: open, 0: close
+    output reg [3:0] DIGIT,
+    output reg [6:0] DISPLAY,
+    output IN1,
+    output IN2,
+    output IN3, 
+    output IN4,
+    output IN5,
+    output IN6,
+    output IN7,
+    output IN8,
+    output trig,
+    output money1_pwm,
+    output money2_pwm,
+    output door_pwm,
+    output C_pwm,
+
+    output audio_mclk,
+    output audio_lrck,
+    output audio_sck,
+    output audio_sdin, 
+    output reg [15:0] led  
+    //output [15:0] LED
+);
+
+    parameter [3:0] Setting_code = 4'b0000;
+    parameter [3:0] Enter_code = 4'b0001;
+    parameter [3:0] Open = 4'b0010;
+    parameter [3:0] Play_mode = 4'b0011;
+    parameter [3:0] Open_throw = 4'b0100;
+    parameter [3:0] Throw = 4'b0101;
+    parameter [3:0] Out = 4'b0110;
+    parameter [3:0] In = 4'b0111;
+    parameter [3:0] Close = 4'b1000;
+    parameter [3:0] IDLE = 4'b1001;
+    parameter [3:0] Wait = 4'b1010;
+    parameter [3:0] Wait_Play = 4'b1011;
+
+
+    reg [3:0] state;
+    reg [3:0] Show0, Show1, Show2, Show3;
+    reg [3:0] value;
+    reg [3:0] Pass0, Pass1, Pass2, Pass3;
+    reg [3:0] Ans0, Ans1, Ans2, Ans3;
+    reg [15:0] nums,nums_2,nums_3;
+    reg [15:0] answer;
+    reg [1:0] counter;
+    reg [2:0] motor_mode;
+    wire [19:0] distance;
+
+    wire [511:0] key_down;
+	wire [8:0] last_change;
+	wire been_ready;
+    reg [3:0] key_num;
+	reg [9:0] last_key;
+    reg [35:0] cycle_hold;
+    reg flag; //things inside or not
+    reg [35:0] counter2;
+
+    wire clk_d_15;
+    clock_divider #(.n(15)) d15(.clk(clk),.clk_div(clk_d_15));
+    wire clk_d_22;
+    clock_divider #(.n(22)) d22(.clk(clk),.clk_div(clk_d_22));
+
+    reg cur_play;
+    wire [3:0] random;
+    reg beep, play_music;
+    //LFSR L(.clk(clk),.rst(rst),.random(random));
+
+    // Internal Signal
+    wire [15:0] audio_in_left, audio_in_right;
+    wire [11:0] ibeatNum;               // Beat counter
+    wire [31:0] freqL2, freqR2; 
+    wire [31:0]  freqL1, freqR1;   
+    reg [31:0] freqL, freqR;        // Raw frequency, produced by music module
+    wire [21:0] freq_outL, freq_outR;    // Processed frequency, adapted to the clock rate of Basys3
+    //wire clkDiv22, clk_15;
+    reg _mute; 
+    reg [39:0] throw_hold;
+    reg [35:0] led_hold;
+    wire too_close;
+    
+
+    //parameter [8:0] ENTER_CODES = 9'b0_0101_1010;
+    //assign ENTER = (key_down[ENTER_CODES] == 1'b1 ) ? 1'b1 : 1'b0;
+
+    parameter [8:0] KEY_CODES [0:21] = {
+		9'b0_0100_0101,	// 0 => 45
+		9'b0_0001_0110,	// 1 => 16
+		9'b0_0001_1110,	// 2 => 1E
+		9'b0_0010_0110,	// 3 => 26
+		9'b0_0010_0101,	// 4 => 25
+		9'b0_0010_1110,	// 5 => 2E
+		9'b0_0011_0110,	// 6 => 36
+		9'b0_0011_1101,	// 7 => 3D
+		9'b0_0011_1110,	// 8 => 3E
+		9'b0_0100_0110,	// 9 => 46
+		
+		9'b0_0111_0000, // right_0 => 70
+		9'b0_0110_1001, // right_1 => 69
+		9'b0_0111_0010, // right_2 => 72
+		9'b0_0111_1010, // right_3 => 7A
+		9'b0_0110_1011, // right_4 => 6B
+		9'b0_0111_0011, // right_5 => 73
+		9'b0_0111_0100, // right_6 => 74
+		9'b0_0110_1100, // right_7 => 6C
+		9'b0_0111_0101, // right_8 => 75
+		9'b0_0111_1101,  // right_9 => 7D
+        9'b0_0101_1010, //Enter => 5A
+        9'b0_0010_1001// Space => 29
+       
+	};
+
+    always @ (*) begin
+		case (last_change)
+			KEY_CODES[00] : key_num = 4'b0000;
+			KEY_CODES[01] : key_num = 4'b0001;
+			KEY_CODES[02] : key_num = 4'b0010;
+			KEY_CODES[03] : key_num = 4'b0011;
+			KEY_CODES[04] : key_num = 4'b0100;
+			KEY_CODES[05] : key_num = 4'b0101;
+			KEY_CODES[06] : key_num = 4'b0110;
+			KEY_CODES[07] : key_num = 4'b0111;
+			KEY_CODES[08] : key_num = 4'b1000;
+			KEY_CODES[09] : key_num = 4'b1001;
+			KEY_CODES[10] : key_num = 4'b0000;
+			KEY_CODES[11] : key_num = 4'b0001;
+			KEY_CODES[12] : key_num = 4'b0010;
+			KEY_CODES[13] : key_num = 4'b0011;
+			KEY_CODES[14] : key_num = 4'b0100;
+			KEY_CODES[15] : key_num = 4'b0101;
+			KEY_CODES[16] : key_num = 4'b0110;
+			KEY_CODES[17] : key_num = 4'b0111;
+			KEY_CODES[18] : key_num = 4'b1000;
+			KEY_CODES[19] : key_num = 4'b1001;
+            KEY_CODES[20] : key_num = 4'b1010;
+            KEY_CODES[21] : key_num = 4'b1011;
+			default		  : key_num = 4'b1111;
+		endcase
+	end
+    assign too_close = (distance <= 10 && distance>0) ? 1 : 0;
+
+    always @(posedge clk, posedge rst) begin
+        if(rst) begin
+            state = IDLE;
+            {Show0, Show1, Show2, Show3} = 16'b0;
+            {Ans0, Ans1, Ans2, Ans3} = 16'b0;
+            nums = 16'b0;
+            nums_2 = 16'b0;
+            beep = 0;
+            play_music = 0;
+            led = 16'b0000_0000_0000_0000;
+            counter = 0;
+        end
+        else begin
+            case(state)
+            IDLE: begin
+                motor_mode = 3'b101;
+                //led = 16'b0000_0000_0000_0001;
+                counter = 0;
+                {Show0, Show1, Show2, Show3} = 0;
+                nums_3 = 0;
+                nums = 0;
+                nums_2 = 0;
+                if (been_ready && key_down[last_change] == 1'b1) begin
+                    if (key_num == 4'b1010) begin
+                       if(mode)  begin
+                            //state = Wait_Play;
+                            state = Play_mode;
+                            cur_play = 1;
+                            cycle_hold = 0;
+                       end else begin
+                           state = Wait;
+                           cur_play = 0;
+                       end
+                    end
+                end
+                flag = 0;
+                beep = 0;
+                play_music = 0;
+                _mute = 1;
+            end
+            Wait: begin
+                motor_mode = 3'b101;
+                //led = 16'b0000_0000_0000_0010;
+                if(door) begin
+                    state = Open;
+                    cycle_hold = 0;
+                end
+                {Show0, Show1, Show2, Show3} = 16'b0;
+                beep = 0;
+                play_music = 0;
+                _mute = 1;
+            end
+            Setting_code: begin
+                motor_mode = 3'b101;
+                //led = 16'b0000_0000_0000_0100;
+                nums = nums;
+                if (been_ready && key_down[last_change] == 1'b1) begin
+                    if (key_num != 4'b1111)begin
+                        nums = {nums[11:0], key_num};
+                    end
+                    if (key_num == 4'b1010) begin
+                        {Pass0, Pass1, Pass2, Pass3} = {Show0, Show1, Show2, Show3};
+                        nums_2 = 16'b0;
+                        state = Enter_code;
+                        led_hold = 0;
+                        {Show0, Show1, Show2, Show3} = 16'b0;
+                    end
+                end
+                Show0 = nums[3:0];
+                Show1 = nums[7:4];
+                Show2 = nums[11:8];
+                Show3 = nums[15:12];
+                beep = 0;
+                play_music = 0;
+                _mute = 1;
+            end
+            Enter_code: begin
+                nums_2 = nums_2;
+                motor_mode = 3'b101;
+                //led = 16'b0000_0000_0000_1000;
+                if (been_ready && key_down[last_change] == 1'b1) begin
+                    if (key_num != 4'b1111)begin
+                        nums_2 = {nums_2[11:0], key_num};
+                    end
+                    if (key_num == 4'b1010) begin
+                        if( {Show0, Show1, Show2, Show3} == {Pass0, Pass1, Pass2, Pass3}) begin
+                            state = Open;
+                            cycle_hold = 0;
+                        end
+                        else begin
+                            nums_2 = 16'b0000_0000_0000_0000;
+                        end
+                    end
+                end
+                //if (too_close) led = 16'b1111_1111_1111_1111;
+                //else led = 16'b0000_0000_0000_0000;
+                if(distance <= 100 && distance>0) begin
+                    if(counter2 == 36'd0_5000_0000)begin
+                        if(led == 16'b0000_0000_0000_0000)begin
+                            led = 16'b1111_1111_1111_1111;
+                        end else begin
+                            led = 16'b0000_0000_0000_0000;
+                        end
+                        counter2 = 0;
+                    end else begin
+                        counter2 = counter2 + 1;
+                    end
+                end else led = 16'b0000_0000_0000_0000;
+                Show0 = nums_2[3:0];
+                Show1 = nums_2[7:4];
+                Show2 = nums_2[11:8];
+                Show3 = nums_2[15:12];
+                beep = 1;
+                play_music = 0;
+                _mute = 0;
+            end
+            Open: begin
+                motor_mode = 3'b000;
+                //led = 16'b0000_0000_0001_0000;
+                if(cycle_hold == 36'd9_0000_0000) begin
+                    if(flag) begin
+                        state = Out;
+                        cycle_hold = 0;
+                    end else state = In;
+                end else cycle_hold = cycle_hold + 1;
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                //beep = 0;
+                //play_music = 0;
+                //_mute = 1;
+            end
+            /*Wait_Play: begin
+                motor_mode = 3'b101;
+                if (cycle_hold == 36'd0_0000_0010) begin
+                    if(counter == 2'b00)begin
+                        Ans0 = {1'b0, random[2:0]};
+                    end else if(counter == 2'b01)begin
+                        Ans1 = {1'b0, random[2:0]};
+                    end else if(counter == 2'b10)begin
+                        Ans2 = {1'b0, random[2:0]};
+                    end else if(counter == 2'b11)begin
+                        Ans3 = {1'b0, random[2:0]};  
+                        state = Play_mode;
+                    end
+                    counter = counter + 1;
+                    cycle_hold = 0;
+                end
+                else cycle_hold = cycle_hold + 1;
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                led = 16'b0000_0000_0000_0000;
+
+            end*/
+            Play_mode: begin
+                motor_mode = 3'b101;
+                {Ans0, Ans1, Ans2, Ans3} = 16'b0001_0001_0001_0001;
+                //led = 16'b0000_0000_0010_0000;
+                if (been_ready && key_down[last_change] == 1'b1) begin
+                   
+                    if (key_num == 4'b1011) begin
+                        //RANDOM ANSWER 
+                        if(Show0 == Ans0) begin
+                            led [3:0] = 4'b1111;
+                        end
+                        if(Show1 == Ans1) begin
+                            led [7:4] = 4'b1111;
+                        end
+                        if(Show2 == Ans2) begin
+                            led [11:8] = 4'b1111;
+                        end
+                        if(Show3 == Ans3) begin
+                            led [15:12] = 4'b1111;
+                        end
+                    end
+                    else if (key_num == 4'b1010) begin
+                        if({Show0, Show1, Show2, Show3} == {Ans0, Ans1, Ans2, Ans3}) begin
+                            state = Open_throw;
+                            cycle_hold = 0;
+                        end else begin
+                            nums_3 = 16'b0000_0000_0000_0000;
+                            led = 16'b0000_0000_0000_0000;
+                        end
+                    end
+                    else if (key_num != 4'b1111)begin
+                        nums_3 = {nums_3[11:0], key_num};
+                        led = 16'b0000_0000_0000_0000;
+                    end
+                end
+                /*if(distance <= 10 && distance>0) begin
+                    if(led_hold == 36'd0_0100_0000) begin
+                        if(led == 16'b0000_0000_0000_0000) led = 16'b1111_1111_1111_1111;
+                        else led = 16'b0000_0000_0000_0000;
+                        led_hold = 0;
+                    end else led_hold = led_hold + 1;
+                end else begin
+                    led = 16'b0000_0000_0000_0000;
+                    led_hold = 0;
+                end*/
+                Show0 = nums_3[3:0];
+                Show1 = nums_3[7:4];
+                Show2 = nums_3[11:8];
+                Show3 = nums_3[15:12];
+                beep = 1;
+                play_music = 0;
+                _mute = 0;
+            end
+            Open_throw: begin
+               motor_mode = 3'b000;
+               //led = 16'b0000_0000_0100_0000;
+                if(cycle_hold == 36'd9_0000_0000)begin
+                    state = Throw;
+                    cycle_hold = 0;
+                    throw_hold = 0;
+
+                end else cycle_hold = cycle_hold + 1;
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                beep = 0;
+                play_music = 1;
+                _mute = 0;
+            end
+            Throw: begin
+                motor_mode = 3'b010;
+                //led = 16'b0000_0000_1000_0000;
+                //if(throw_hold == 40'd50_0000_0000)begin
+                if(cycle_hold == 36'd9_0000_0000)begin
+                    state = Close;
+                    //led = 16'b0000_0000_0000_0000;
+                    throw_hold = 0;
+                    cycle_hold = 0;
+                    led_hold = 0;
+                end else cycle_hold = cycle_hold + 1;
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                beep = 0;
+                play_music = 1;
+                _mute = 0;
+            end
+            Close: begin
+                motor_mode = 3'b001;
+                led = 16'b0000_0000_0000_0000;
+                if(cycle_hold == 36'd9_0000_0000)begin
+                    if(cur_play) begin
+                        state = IDLE;
+                    end else begin
+                        if(flag) begin
+                            state = Setting_code;
+                        end else begin
+                            state = IDLE;
+                        end
+                    end
+                end else cycle_hold = cycle_hold + 1;
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                beep = 0;
+                play_music = 0;
+                _mute = 1;
+                /*if(distance <= 10 && distance>0) begin
+                    if(led_hold == 36'd0_0100_0000) begin
+                        if(led == 16'b0000_0000_0000_0000) led = 16'b1111_1111_1111_1111;
+                        else led = 16'b0000_0000_0000_0000;
+                        led_hold = 0;
+                    end else led_hold = led_hold + 1;
+                end else begin
+                    led = 16'b0000_0000_0000_0000;
+                    led_hold = 0;
+                end*/
+                //if(distance <= 100 && distance>0) begin
+                //    led = 16'b1111_1111_1111_1111;
+                //end else led = 16'b0000_0000_0000_0000;
+
+            end
+            Out: begin
+               motor_mode = 3'b011;
+               //led = 16'b0000_0010_0000_0000;
+                if(cycle_hold == 36'd5_0000_0000)begin
+                    flag = 0;
+                    state = Close;
+                    cycle_hold = 0;
+                end else cycle_hold = cycle_hold + 1;
+              
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                beep = 0;
+                play_music = 0;
+                _mute = 1;
+                /*if (been_ready && key_down[last_change] == 1'b1) begin
+                    if (ENTER == 1'b1) begin
+                        flag = 0;
+                        state = Close;
+                    end
+                end*/
+            end
+            In: begin
+                motor_mode = 3'b100;
+                //led = 16'b0000_0100_0000_0000;
+                if(!door) begin
+                    flag = 1;
+                    state = Close;
+                    cycle_hold = 0;
+                end
+                {Show0, Show1, Show2, Show3} = 16'b1010_1010_1010_1010;
+                beep = 0;
+                play_music = 0;
+                _mute = 1;
+                /*if (been_ready && key_down[last_change] == 1'b1) begin
+                    if (ENTER == 1'b1) begin
+                        flag = 1;
+                        state = Close;
+                    end
+                end*/
+            end
+            endcase
+        end
+    end
+ 
+
+    
+
+
+    /*always @(posedge clk) begin
+        if(rst) begin
+            freqL1 = `silence;  //freqR1 = `silence;
+            beep_cycle = 0;
+
+        end else begin
+            if(play_music) begin
+                freqL1 = freqL;
+                //freqR1 = freqR;
+            end
+            else if(beep) begin
+                if(distance <= 10 && distance>0)begin
+                    if(beep_cycle >= 36'd0_1000_0000) begin
+                        freqL1 = `hg; // freqR1 = `hg;
+                        beep_cycle = beep_cycle+1;
+                        if(beep_cycle == 36'd0_2000_0000) begin
+                            beep_cycle = 0;
+                        end
+                    end else begin
+                        beep_cycle = beep_cycle+1;
+                        freqL1 = `silence;  //freqR1 = `silence;
+                    end
+                end
+            end
+            if(!beep) beep_cycle = 0;
+        end
+    end*/
+
+    KeyboardDecoder key_de (
+		.key_down(key_down),
+		.last_change(last_change),
+		.key_valid(been_ready),
+		.PS2_DATA(PS2_DATA),
+		.PS2_CLK(PS2_CLK),
+		.rst(rst),
+		.clk(clk)
+	);
+    motor A(
+        .clk(clk),
+        .rst(rst),
+        .mode(motor_mode),
+        .pwm({money1_pwm, money2_pwm, door_pwm, C_pwm}),
+        .money1({IN1, IN2}),
+        .money2({IN7, IN8}),
+        .door({IN3, IN4}),
+        .C({IN5, IN6})
+    );
+    
+    sonic_top B(
+        .clk(clk), 
+        .rst(rst), 
+        .Echo(echo), 
+        .Trig(trig),
+        .distance(distance)
+    );
+
+    //-------------------music------------------//
+    player_control #(.LEN(720)) playerCtrl_00 ( 
+        .clk(clk_d_22),
+        .reset(rst),
+        ._play(play_music),
+        //._slow(0), 
+        ._mode(play_music),
+        .ibeat(ibeatNum)
+    );
+
+    music_example music_00 (
+        .ibeatNum(ibeatNum),
+        .en(play_music),
+        .toneL(freqL1)
+    );
+    
+    reg [2:0]Vol;
+    always@(*)begin
+        if(play_music)begin
+            freqL = freqL1;
+            freqR = freqL1;
+            Vol = 1;
+        end else begin
+            freqL = `sil;
+            freqR = `sil;
+            Vol = 0;
+        end
+    end 
+
+    assign freq_outL = 50000000 / freqL;
+    assign freq_outR = 50000000 / freqR;
+    
+    note_gen noteGen_00(
+        .clk(clk), 
+        .rst(rst), 
+        .volume(Vol),
+        .note_div_left(freq_outL), 
+        .note_div_right(freq_outR), 
+        .audio_left(audio_in_left),     // left sound audio
+        .audio_right(audio_in_right)    // right sound audio
+    );
+    speaker_control sc(
+        .clk(clk), 
+        .rst(rst), 
+        .audio_in_left(audio_in_left),      // left channel audio data input
+        .audio_in_right(audio_in_right),    // right channel audio data input
+        .audio_mclk(audio_mclk),            // master clock
+        .audio_lrck(audio_lrck),            // left-right clock
+        .audio_sck(audio_sck),              // serial clock
+        .audio_sdin(audio_sdin)             // serial audio data input
+    );
+    //-------------------music------------------//
+    always @(posedge clk_d_15) begin
+        case(DIGIT)
+            4'b1110: begin
+                value = Show1;
+                DIGIT = 4'b1101;
+            end
+            4'b1101: begin
+                value = Show2;
+                DIGIT = 4'b1011;
+            end
+            4'b1011: begin
+                value = Show3;
+                DIGIT = 4'b0111;
+            end
+            4'b0111: begin
+                value = Show0;
+                DIGIT = 4'b1110;
+            end
+            default: begin
+                value = Show0;
+                DIGIT = 4'b1110;
+            end
+        endcase
+        
+    end
+    
+    
+    
+    always @ (*) begin
+    	case (value)
+    		4'd0 : DISPLAY = 7'b1000000;	//0000
+			4'd1 : DISPLAY = 7'b1111001;   //0001                                                
+			4'd2 : DISPLAY = 7'b0100100;   //0010                                                
+			4'd3 : DISPLAY = 7'b0110000;   //0011                                             
+			4'd4 : DISPLAY = 7'b0011001;   //0100                                               
+			4'd5 : DISPLAY = 7'b0010010;   //0101                                               
+			4'd6 : DISPLAY = 7'b0000010;   //0110
+			4'd7 : DISPLAY = 7'b1111000;   //0111
+			4'd8 : DISPLAY = 7'b0000000;   //1000
+			4'd9 : DISPLAY = 7'b0010000;	//1001
+            4'd10 : DISPLAY = 7'b0111111; //-
+			default : DISPLAY = 7'b1111111;
+    	endcase
+    end
+    
+endmodule
+
+module clock_divider #(parameter n=25)(
+    input clk,
+    output clk_div
+);
+    reg [n-1:0] num=0;
+    wire [n-1:0] next_num;
+    always @(posedge clk) begin
+        num<=next_num;
+    end
+    assign next_num = num+1;
+    assign clk_div = num[n-1];
+endmodule
+
+module motor(
+    input clk,
+    input rst,
+    input [2:0]mode,
+    output [3:0]pwm,
+    output reg [1:0]money1,
+    output reg [1:0]money2,
+    output reg [1:0]door,
+    output reg [1:0]C
+);
+
+    reg [9:0]next_money_motor, next_door_motor, next_C_motor;
+    reg [9:0]money1_motor, money2_motor, door_motor, C_motor;
+    wire money1_pwm,money2_pwm, door_pwm, C_pwm;
+
+    motor_pwm m0(clk, rst, money1_motor, money1_pwm);
+    motor_pwm m3(clk, rst, money2_motor, money2_pwm);
+    motor_pwm m1(clk, rst, door_motor, door_pwm);
+    motor_pwm m2(clk, rst, C_motor, C_pwm);
+
+    assign pwm = {money1_pwm, money2_pwm, door_pwm, C_pwm};
+
+    // TODO: trace the rest of motor.v and control the speed and direction of the two motors
+    always @(*) begin
+        if(mode == 3'b000)begin // open door
+            door_motor = 800;
+            money1_motor = 0;
+            money2_motor = 0;
+            C_motor = 0;
+            money1 = 2'b11;
+            money2 = 2'b11;
+            door = 2'b10;
+            C = 2'b11;
+        end else if(mode == 3'b001)begin //close door
+            door_motor = 800;
+            money1_motor = 0;
+            money2_motor = 0;
+            C_motor = 0;
+            money1 = 2'b11;
+            money2 = 2'b11;
+            door = 2'b01;
+            C = 2'b11;
+        end else if(mode == 3'b010)begin //throw money
+            door_motor = 0;
+            money1_motor = 1000;
+            money2_motor = 700;
+            C_motor = 0;
+            money1 = 2'b10;
+            money2 = 2'b10;
+            door = 2'b11;
+            C = 2'b11;
+        end else if(mode == 3'b011) begin //out
+            door_motor = 0;
+            money1_motor = 0;
+            money2_motor = 0;
+            C_motor = 700;
+            money1 = 2'b11;
+            money2 = 2'b11;
+            door = 2'b11;
+            C = 2'b10;
+
+        end else if(mode == 3'b100) begin //in
+            door_motor = 0;
+            money1_motor = 0;
+            money2_motor = 0;
+            C_motor = 700;
+            money1 = 2'b11;
+            money2 = 2'b11;
+            door = 2'b11;
+            C = 2'b01;
+        end else begin
+            door_motor = 0;
+            money1_motor = 0;
+            money2_motor = 0;
+            C_motor = 0;
+            money1 = 2'b11;
+            money2 = 2'b11;
+            door = 2'b11;
+            C = 2'b11;
+        end
+    end
+    
+
+    
+endmodule
+
+module motor_pwm (
+    input clk,
+    input reset,
+    input [9:0]duty,
+	output pmod_1 //PWM
+);
+        
+    PWM_gen pwm_0 ( 
+        .clk(clk), 
+        .reset(reset), 
+        .freq(32'd25000),
+        .duty(duty), 
+        .PWM(pmod_1)
+    );
+
+endmodule
+
+//generte PWM by input frequency & duty cycle
+module PWM_gen (
+    input wire clk,
+    input wire reset,
+	input [31:0] freq,
+    input [9:0] duty,
+    output reg PWM
+);
+    wire [31:0] count_max = 100_000_000 / freq;
+    wire [31:0] count_duty = count_max * duty / 1024;
+    reg [31:0] count;
+        
+    always @(posedge clk, posedge reset) begin
+        if (reset) begin
+            count <= 0;
+            PWM <= 0;
+        end else if (count < count_max) begin
+            count <= count + 1;
+            if(count < count_duty)
+                PWM <= 1;
+            else
+                PWM <= 0;
+        end else begin
+            count <= 0;
+            PWM <= 0;
+        end
+    end
+endmodule
+
+/*
+module LFSR(
+    input wire clk,
+    input wire rst,
+    output reg [3:0] random
+);
+    always @(posedge clk or posedge rst) begin
+        if (rst == 1'b1) begin
+            random[3:0] <= 4'b1000;
+        end else begin
+            random[2:0] <= random[3:1];
+            random[3] <= random[1];
+        end
+    end
+endmodule
+*/
+module sonic_top(clk, rst, Echo, Trig, distance);
+	input clk, rst, Echo;
+	output Trig;
+    output [19:0] distance;
+
+	wire[19:0] dis;
+    wire clk1M;
+	wire clk_2_17;
+
+    assign distance = dis;
+
+    div clk1(clk ,clk1M);
+	TrigSignal u1(.clk(clk), .rst(rst), .trig(Trig));
+	PosCounter u2(.clk(clk1M), .rst(rst), .echo(Echo), .distance_count(dis));
+ 
+endmodule
+
+
+module PosCounter(clk, rst, echo, distance_count); 
+    input clk, rst, echo;
+    output[19:0] distance_count;
+
+    parameter S0 = 2'b00;
+    parameter S1 = 2'b01; 
+    parameter S2 = 2'b10;
+    
+    wire start, finish;
+    reg[1:0] curr_state, next_state;
+    reg echo_reg1, echo_reg2;
+    reg[19:0] count, distance_register;
+    reg [19:0] distance_count; 
+
+    always@(posedge clk) begin
+        if(rst) begin
+            echo_reg1 <= 0;
+            echo_reg2 <= 0;
+            count <= 0;
+            distance_register  <= 0;
+            curr_state <= S0;
+        end
+        else begin
+            echo_reg1 <= echo;   
+            echo_reg2 <= echo_reg1; 
+            case(curr_state)
+                S0:begin
+                    if (start) curr_state <= next_state; //S1
+                    else count <= 0;
+                end
+                S1:begin
+                    if (finish) curr_state <= next_state; //S2
+                    else count <= count + 1;
+                end
+                S2:begin
+                    distance_register <= count;
+                    count <= 0;
+                    curr_state <= next_state; //S0
+                end
+            endcase
+        end
+    end
+
+    always @(*) begin
+        case(curr_state)
+            S0:next_state = S1;
+            S1:next_state = S2;
+            S2:next_state = S0;
+            default:next_state = S0;
+        endcase
+    end
+
+    assign start = echo_reg1 & ~echo_reg2;  
+    assign finish = ~echo_reg1 & echo_reg2;
+
+    always @(*) begin
+        distance_count = distance_register/2*340/1000; //cm
+    end
+
+    // TODO: trace the code and calculate the distance, output it to <distance_count>
+
+    
+endmodule
+
+
+// send trigger signal to sensor
+module TrigSignal(clk, rst, trig);
+    input clk, rst;
+    output trig;
+
+    reg trig, next_trig;
+    reg[23:0] count, next_count;
+
+    always @(posedge clk, posedge rst) begin
+        if (rst) begin
+            count <= 0;
+            trig <= 0;
+        end
+        else begin
+            count <= next_count;
+            trig <= next_trig;
+        end
+    end
+    // count 10us to set trig high and wait for 100ms
+    always @(*) begin
+        next_trig = trig;
+        next_count = count + 1;
+        if(count == 999)
+            next_trig = 0;
+        else if(count == 24'd9999999) begin
+            next_trig = 1;
+            next_count = 0;
+        end
+    end
+endmodule
+// clock divider for T = 1us clock
+module div(clk ,out_clk);
+    input clk;
+    output out_clk;
+    reg out_clk;
+    reg [6:0]cnt;
+    
+    always @(posedge clk) begin   
+        if(cnt < 7'd50) begin
+            cnt <= cnt + 1'b1;
+            out_clk <= 1'b1;
+        end 
+        else if(cnt < 7'd100) begin
+	        cnt <= cnt + 1'b1;
+	        out_clk <= 1'b0;
+        end
+        else if(cnt == 7'd100) begin
+            cnt <= 0;
+            out_clk <= 1'b1;
+        end
+    end
+endmodule
+
+module player_control (
+	input clk, 
+	input reset, 
+	input _play, 
+	//input _slow, 
+	input _mode, 
+	output reg [11:0] ibeat
+);
+	parameter LEN = 12'd720;
+    reg [11:0] next_ibeat;
+
+	always @(posedge clk, posedge reset) begin
+		if (reset) begin
+			ibeat <= 0;
+		end else if(_mode && _play)begin
+			ibeat <= next_ibeat;
+		end
+	end
+
+    always @* begin
+        next_ibeat = (ibeat + 1 <= LEN ) ? (ibeat + 1) : 0;
+    end
+
+endmodule
+
+
+module note_gen(
+    clk, // clock from crystal
+    rst, // active high reset
+    cur_vol, 
+    note_div_left, // div for note generation
+    note_div_right,
+    audio_left,
+    audio_right
+    
+);
+
+    // I/O declaration
+    input clk; // clock from crystal
+    input rst; // active low reset
+    input [2:0] cur_vol;
+    input [21:0] note_div_left, note_div_right; // div for note generation
+    output [15:0] audio_left, audio_right;
+
+  
+
+    // Declare internal signals
+    reg [21:0] clk_cnt_next, clk_cnt;
+    reg [21:0] clk_cnt_next_2, clk_cnt_2;
+    reg b_clk, b_clk_next;
+    reg c_clk, c_clk_next;
+
+    // Note frequency generation
+    // clk_cnt, clk_cnt_2, b_clk, c_clk
+    always @(posedge clk or posedge rst)
+        if (rst == 1'b1)
+            begin
+                clk_cnt <= 22'd0;
+                clk_cnt_2 <= 22'd0;
+                b_clk <= 1'b0;
+                c_clk <= 1'b0;
+            end
+        else
+            begin
+                clk_cnt <= clk_cnt_next;
+                clk_cnt_2 <= clk_cnt_next_2;
+                b_clk <= b_clk_next;
+                c_clk <= c_clk_next;
+            end
+    
+    // clk_cnt_next, b_clk_next
+    always @*
+        if (clk_cnt == note_div_left)
+            begin
+                clk_cnt_next = 22'd0;
+                b_clk_next = ~b_clk;
+            end
+        else
+            begin
+                clk_cnt_next = clk_cnt + 1'b1;
+                b_clk_next = b_clk;
+            end
+
+    // clk_cnt_next_2, c_clk_next
+    always @*
+        if (clk_cnt_2 == note_div_right)
+            begin
+                clk_cnt_next_2 = 22'd0;
+                c_clk_next = ~c_clk;
+            end
+        else
+            begin
+                clk_cnt_next_2 = clk_cnt_2 + 1'b1;
+                c_clk_next = c_clk;
+            end
+    reg [15:0] peak1,peak2;
+
+    always @(*) begin
+        case(cur_vol)
+        3'b000: begin
+            peak1=16'h0000;
+            peak2=16'h0000;
+        end
+        3'b001: begin
+            peak1=16'hF000;
+            peak2=16'h1000;
+        end
+        3'b010: begin
+            peak1=16'hE000;
+            peak2=16'h2000;
+        end
+        3'b011: begin
+            peak1=16'hD000;
+            peak2=16'h3000;
+        end
+        3'b100: begin
+            peak1=16'hC000;
+            peak2=16'h4000;
+        end
+        3'b101: begin
+            peak1=16'hB000;
+            peak2=16'h5000;
+        end
+        default: begin
+            peak1=16'hD000;
+            peak2=16'h3000;
+        end
+        endcase
+    end
+
+    // Assign the amplitude of the note
+    // Volume is controlled here
+    assign audio_left = (note_div_left == 22'd1) ? 16'h0000 : 
+                                (b_clk == 1'b0) ? peak1 : peak2;
+    assign audio_right = (note_div_right == 22'd1) ? 16'h0000 : 
+                                (c_clk == 1'b0) ? peak1 : peak2;
+
+    
+endmodule
+
+module speaker_control(
+    clk,  // clock from the crystal
+    rst,  // active high reset
+    audio_in_left, // left channel audio data input
+    audio_in_right, // right channel audio data input
+    audio_mclk, // master clock
+    audio_lrck, // left-right clock, Word Select clock, or sample rate clock
+    audio_sck, // serial clock
+    audio_sdin // serial audio data input
+);
+
+    // I/O declaration
+    input clk;  // clock from the crystal
+    input rst;  // active high reset
+    input [15:0] audio_in_left; // left channel audio data input
+    input [15:0] audio_in_right; // right channel audio data input
+    output audio_mclk; // master clock
+    output audio_lrck; // left-right clock
+    output audio_sck; // serial clock
+    output audio_sdin; // serial audio data input
+    reg audio_sdin;
+
+    // Declare internal signal nodes 
+    wire [8:0] clk_cnt_next;
+    reg [8:0] clk_cnt;
+    reg [15:0] audio_left, audio_right;
+
+    // Counter for the clock divider
+    assign clk_cnt_next = clk_cnt + 1'b1;
+
+    always @(posedge clk or posedge rst)
+        if (rst == 1'b1)
+            clk_cnt <= 9'd0;
+        else
+            clk_cnt <= clk_cnt_next;
+
+    // Assign divided clock output
+    assign audio_mclk = clk_cnt[1];
+    assign audio_lrck = clk_cnt[8];
+    assign audio_sck = 1'b1; // use internal serial clock mode
+
+    // audio input data buffer
+    always @(posedge clk_cnt[8] or posedge rst)
+        if (rst == 1'b1)
+            begin
+                audio_left <= 16'd0;
+                audio_right <= 16'd0;
+            end
+        else
+            begin
+                audio_left <= audio_in_left;
+                audio_right <= audio_in_right;
+            end
+
+    always @*
+        case (clk_cnt[8:4])
+            5'b00000: audio_sdin = audio_right[0];
+            5'b00001: audio_sdin = audio_left[15];
+            5'b00010: audio_sdin = audio_left[14];
+            5'b00011: audio_sdin = audio_left[13];
+            5'b00100: audio_sdin = audio_left[12];
+            5'b00101: audio_sdin = audio_left[11];
+            5'b00110: audio_sdin = audio_left[10];
+            5'b00111: audio_sdin = audio_left[9];
+            5'b01000: audio_sdin = audio_left[8];
+            5'b01001: audio_sdin = audio_left[7];
+            5'b01010: audio_sdin = audio_left[6];
+            5'b01011: audio_sdin = audio_left[5];
+            5'b01100: audio_sdin = audio_left[4];
+            5'b01101: audio_sdin = audio_left[3];
+            5'b01110: audio_sdin = audio_left[2];
+            5'b01111: audio_sdin = audio_left[1];
+            5'b10000: audio_sdin = audio_left[0];
+            5'b10001: audio_sdin = audio_right[15];
+            5'b10010: audio_sdin = audio_right[14];
+            5'b10011: audio_sdin = audio_right[13];
+            5'b10100: audio_sdin = audio_right[12];
+            5'b10101: audio_sdin = audio_right[11];
+            5'b10110: audio_sdin = audio_right[10];
+            5'b10111: audio_sdin = audio_right[9];
+            5'b11000: audio_sdin = audio_right[8];
+            5'b11001: audio_sdin = audio_right[7];
+            5'b11010: audio_sdin = audio_right[6];
+            5'b11011: audio_sdin = audio_right[5];
+            5'b11100: audio_sdin = audio_right[4];
+            5'b11101: audio_sdin = audio_right[3];
+            5'b11110: audio_sdin = audio_right[2];
+            5'b11111: audio_sdin = audio_right[1];
+            default: audio_sdin = 1'b0;
+        endcase
+
+endmodule
+module music_example (
+	input [11:0] ibeatNum,
+	input en,
+	output reg [31:0] toneL
+    //output wire [31:0] toneR
+);
+    //assign toneR = toneL;
+    always @* begin
+        if(en == 1) begin
+            case(ibeatNum)
+                // --- Measure 1 ---
+                12'd0: toneL = `sil;      12'd1: toneL = `a; // HG (half-beat)
+                12'd2: toneL = `a;      12'd3: toneL = `a;
+                12'd4: toneL = `a;      12'd5: toneL = `a;
+                12'd6: toneL = `a;      12'd7: toneL = `a;
+                12'd8: toneL = `a;      12'd9: toneL = `a; // HE (half-beat)
+                12'd10: toneL = `a;     12'd11: toneL = `a;
+                12'd12: toneL = `a;     12'd13: toneL = `a;
+                12'd14: toneL = `a;     12'd15: toneL = `a; // (Short break for repetitive notes: high E)
+
+                12'd16: toneL = `b;    12'd17: toneL = `b; // HE (one-beat)
+                12'd18: toneL = `b;     12'd19: toneL = `b;
+                12'd20: toneL = `b;     12'd21: toneL = `b;
+                12'd22: toneL = `b;     12'd23: toneL = `b;
+                12'd24: toneL = `b;     12'd25: toneL = `b;
+                12'd26: toneL = `b;     12'd27: toneL = `b;
+                12'd28: toneL = `b;     12'd29: toneL = `b;
+                12'd30: toneL = `b;     12'd31: toneL = `b;
+
+                12'd32: toneL = `hc;     12'd33: toneL = `hc; // HF (half-beat)
+                12'd34: toneL = `hc;     12'd35: toneL = `hc;
+                12'd36: toneL = `hc;     12'd37: toneL = `hc;
+                12'd38: toneL = `hc;     12'd39: toneL = `hc;
+                12'd40: toneL = `hc;     12'd41: toneL = `hc; // HD (half-beat)
+                12'd42: toneL = `hc;     12'd43: toneL = `hc;
+                12'd44: toneL = `hc;     12'd45: toneL = `hc;
+                12'd46: toneL = `hc;     12'd47: toneL = `hc; // (Short break for repetitive notes: high D)
+
+                12'd48: toneL = `hd;     12'd49: toneL = `hd; // HD (one-beat)
+                12'd50: toneL = `hd;     12'd51: toneL = `hd;
+                12'd52: toneL = `hd;     12'd53: toneL = `hd;
+                12'd54: toneL = `hd;     12'd55: toneL = `hd;
+                12'd56: toneL = `hd;     12'd57: toneL = `hd;
+                12'd58: toneL = `hd;     12'd59: toneL = `hd;
+                12'd60: toneL = `hd;     12'd61: toneL = `hd;
+                12'd62: toneL = `hd;     12'd63: toneL = `hd;
+
+                // --- Measure 2 ---
+                12'd64: toneL = `hf;     12'd65: toneL = `hf; // HC (half-beat)
+                12'd66: toneL = `hf;     12'd67: toneL = `hf;
+                12'd68: toneL = `hf;     12'd69: toneL = `hf;
+                12'd70: toneL = `hf;     12'd71: toneL = `hf;
+                12'd72: toneL = `hf;     12'd73: toneL = `hf; // HD (half-beat)
+                12'd74: toneL = `hf;     12'd75: toneL = `hf;
+                12'd76: toneL = `hf;     12'd77: toneL = `hf;
+                12'd78: toneL = `hf;     12'd79: toneL = `hf;
+
+                12'd80: toneL = `he;     12'd81: toneL = `he; // HE (half-beat)
+                12'd82: toneL = `he;     12'd83: toneL = `he;
+                12'd84: toneL = `he;     12'd85: toneL = `he;
+                12'd86: toneL = `he;     12'd87: toneL = `he;
+                12'd88: toneL = `he;     12'd89: toneL = `he; // HF (half-beat)
+                12'd90: toneL = `he;     12'd91: toneL = `he;
+                12'd92: toneL = `he;     12'd93: toneL = `he;
+                12'd94: toneL = `he;     12'd95: toneL = `sil;
+
+                12'd96: toneL = `he;      12'd97: toneL = `he; // HG (half-beat)
+                12'd98: toneL = `he;      12'd99: toneL = `he;
+                12'd100: toneL = `he;     12'd101: toneL = `he;
+                12'd102: toneL = `he;     12'd103: toneL = `he; // (Short break for repetitive notes: high D)
+                12'd104: toneL = `he;     12'd105: toneL = `he; // HG (half-beat)
+                12'd106: toneL = `he;     12'd107: toneL = `he;
+                12'd108: toneL = `he;     12'd109: toneL = `he;
+                12'd110: toneL = `he;     12'd111: toneL = `he; // (Short break for repetitive notes: high D)
+
+                12'd112: toneL = `he;    12'd113: toneL = `he; // HG (one-beat)
+                12'd114: toneL = `he;    12'd115: toneL = `he;
+                12'd116: toneL = `he;    12'd117: toneL = `he;
+                12'd118: toneL = `he;    12'd119: toneL = `he;
+                12'd120: toneL = `he;    12'd121: toneL = `he;
+                12'd122: toneL = `he;    12'd123: toneL = `he;
+                12'd124: toneL = `he;    12'd125: toneL = `he;
+                12'd126: toneL = `he;    12'd127: toneL = `sil;
+
+                // --- Measure 3 ---
+                12'd128: toneL = `he;      12'd129: toneL = `he; // HG (half-beat)
+                12'd130: toneL = `he;      12'd131: toneL = `he;
+                12'd132: toneL = `he;      12'd133: toneL = `he;
+                12'd134: toneL = `he;      12'd135: toneL = `he;
+                12'd136: toneL = `he;      12'd137: toneL = `he; // HE (half-beat)
+                12'd138: toneL = `he;      12'd139: toneL = `he;
+                12'd140: toneL = `he;      12'd141: toneL = `he;
+                12'd142: toneL = `he;      12'd143: toneL = `he; // (Short break for repetitive notes: high E)
+
+                12'd144: toneL = `ha;     12'd145: toneL = `ha; // HE (one-beat)
+                12'd146: toneL = `ha;     12'd147: toneL = `ha;
+                12'd148: toneL = `ha;     12'd149: toneL = `ha;
+                12'd150: toneL = `ha;     12'd151: toneL = `ha;
+                12'd152: toneL = `ha;     12'd153: toneL = `ha;
+                12'd154: toneL = `ha;     12'd155: toneL = `ha;
+                12'd156: toneL = `ha;     12'd157: toneL = `ha;
+                12'd158: toneL = `ha;     12'd159: toneL = `sil;
+
+                12'd160: toneL = `ha;     12'd161: toneL = `ha; // HF (half-beat)
+                12'd162: toneL = `ha;     12'd163: toneL = `ha;
+                12'd164: toneL = `ha;     12'd165: toneL = `ha;
+                12'd166: toneL = `ha;     12'd167: toneL = `ha;
+                12'd168: toneL = `ha;     12'd169: toneL = `ha; // HD (half-beat)
+                12'd170: toneL = `ha;     12'd171: toneL = `ha;
+                12'd172: toneL = `ha;     12'd173: toneL = `ha;
+                12'd174: toneL = `ha;     12'd175: toneL = `ha; // (Short break for repetitive notes: high D)
+
+                12'd176: toneL = `he;     12'd177: toneL = `he; // HD (one-beat)
+                12'd178: toneL = `he;     12'd179: toneL = `he;
+                12'd180: toneL = `he;     12'd181: toneL = `he;
+                12'd182: toneL = `he;     12'd183: toneL = `he;
+                12'd184: toneL = `he;     12'd185: toneL = `he;
+                12'd186: toneL = `he;     12'd187: toneL = `he;
+                12'd188: toneL = `he;     12'd189: toneL = `he;
+                12'd190: toneL = `he;     12'd191: toneL = `sil;   
+
+                // --- Measure 4 ---
+                12'd192: toneL = `he;     12'd193: toneL = `he; // HC (half-beat)
+                12'd194: toneL = `he;     12'd195: toneL = `he;
+                12'd196: toneL = `he;     12'd197: toneL = `he;
+                12'd198: toneL = `he;     12'd199: toneL = `he;
+                12'd200: toneL = `he;     12'd201: toneL = `he; // HE (half-beat)
+                12'd202: toneL = `he;     12'd203: toneL = `he;
+                12'd204: toneL = `he;     12'd205: toneL = `he;
+                12'd206: toneL = `he;     12'd207: toneL = `he;   
+
+                12'd208: toneL = `hd;     12'd209: toneL = `hd; // HG (half-beat)
+                12'd210: toneL = `hd;     12'd211: toneL = `hd;
+                12'd212: toneL = `hd;     12'd213: toneL = `hd;
+                12'd214: toneL = `hd;     12'd215: toneL = `hd; // (Short break for repetitive notes: high D)
+                12'd216: toneL = `hd;     12'd217: toneL = `hd; // HG (half-beat)
+                12'd218: toneL = `hd;     12'd219: toneL = `hd;
+                12'd220: toneL = `hd;     12'd221: toneL = `hd;
+                12'd222: toneL = `hd;     12'd223: toneL = `sil; // (Short break for repetitive notes: high D)   
+
+                12'd224: toneL = `hd;     12'd225: toneL = `hd; // HE (one-beat)
+                12'd226: toneL = `hd;     12'd227: toneL = `hd;
+                12'd228: toneL = `hd;     12'd229: toneL = `hd;
+                12'd230: toneL = `hd;     12'd231: toneL = `hd;
+                12'd232: toneL = `hd;     12'd233: toneL = `hd;
+                12'd234: toneL = `hd;     12'd235: toneL = `hd;
+                12'd236: toneL = `hd;     12'd237: toneL = `hd;
+                12'd238: toneL = `hd;     12'd239: toneL = `hd;    
+
+                12'd240: toneL = `hd;     12'd241: toneL = `hd; // HE (one-beat)
+                12'd242: toneL = `hd;     12'd243: toneL = `hd;
+                12'd244: toneL = `hd;     12'd245: toneL = `hd;
+                12'd246: toneL = `hd;     12'd247: toneL = `hd;
+                12'd248: toneL = `hd;     12'd249: toneL = `hd;
+                12'd250: toneL = `hd;     12'd251: toneL = `hd;
+                12'd252: toneL = `hd;     12'd253: toneL = `hd;
+                12'd254: toneL = `hd;     12'd255: toneL = `hd; 
+
+                // --- Measure 5 ---
+                12'd256: toneL = `he;     12'd257: toneL = `he; // HD (one-beat)
+                12'd258: toneL = `he;     12'd259: toneL = `he;
+                12'd260: toneL = `he;     12'd261: toneL = `he;
+                12'd262: toneL = `he;     12'd263: toneL = `he;
+                12'd264: toneL = `he;     12'd265: toneL = `he;
+                12'd266: toneL = `he;     12'd267: toneL = `he;
+                12'd268: toneL = `he;     12'd269: toneL = `he;
+                12'd270: toneL = `he;     12'd271: toneL = `he;          
+
+                12'd272: toneL = `hf;      12'd273: toneL = `hf; // HD (one-beat)
+                12'd274: toneL = `hf;      12'd275: toneL = `hf;
+                12'd276: toneL = `hf;      12'd277: toneL = `hf;
+                12'd278: toneL = `hf;      12'd279: toneL = `hf;
+                12'd280: toneL = `hf;      12'd281: toneL = `hf;
+                12'd282: toneL = `hf;      12'd283: toneL = `hf;
+                12'd284: toneL = `hf;      12'd285: toneL = `hf;
+                12'd286: toneL = `hf;      12'd287: toneL = `hf;       
+
+                12'd288: toneL = `he;     12'd289: toneL = `he; // HD (half-beat)
+                12'd290: toneL = `he;     12'd291: toneL = `he;
+                12'd292: toneL = `he;     12'd293: toneL = `he;
+                12'd294: toneL = `he;     12'd295: toneL = `he;
+                12'd296: toneL = `he;     12'd297: toneL = `he; // HE (half-beat)
+                12'd298: toneL = `he;     12'd299: toneL = `he;
+                12'd300: toneL = `he;     12'd301: toneL = `he;
+                12'd302: toneL = `he;     12'd303: toneL = `he;       
+
+                12'd304: toneL = `hd;     12'd305: toneL = `hd; // HF (half-beat)
+                12'd306: toneL = `hd;     12'd307: toneL = `hd;
+                12'd308: toneL = `hd;     12'd309: toneL = `hd;
+                12'd310: toneL = `hd;     12'd311: toneL = `hd;
+                12'd312: toneL = `hd;     12'd313: toneL = `hd; 
+                12'd314: toneL = `hd;     12'd315: toneL = `hd;
+                12'd316: toneL = `hd;     12'd317: toneL = `hd;
+                12'd318: toneL = `hd;     12'd319: toneL = `sil;    
+
+                // --- Measure 6 ---                                                                                                                        
+                12'd320: toneL = `hd;     12'd321: toneL = `hd; // HE (one-beat)
+                12'd322: toneL = `hd;     12'd323: toneL = `hd;
+                12'd324: toneL = `hd;     12'd325: toneL = `hd;
+                12'd326: toneL = `hd;     12'd327: toneL = `hd;
+                12'd328: toneL = `hd;     12'd329: toneL = `hd;
+                12'd330: toneL = `hd;     12'd331: toneL = `hd;
+                12'd332: toneL = `hd;     12'd333: toneL = `hd;
+                12'd334: toneL = `hd;     12'd335: toneL = `hd;   
+
+                12'd336: toneL = `hc;     12'd337: toneL = `hc; // HE (one-beat)
+                12'd338: toneL = `hc;     12'd339: toneL = `hc;
+                12'd340: toneL = `hc;     12'd341: toneL = `hc;
+                12'd342: toneL = `hc;     12'd343: toneL = `hc;
+                12'd344: toneL = `hc;     12'd345: toneL = `hc;
+                12'd346: toneL = `hc;     12'd347: toneL = `hc;
+                12'd348: toneL = `hc;     12'd349: toneL = `hc;
+                12'd350: toneL = `hc;     12'd351: toneL = `sil;   
+
+                12'd352: toneL = `hc;     12'd353: toneL = `hc; // HE (one-beat)
+                12'd354: toneL = `hc;     12'd355: toneL = `hc;
+                12'd356: toneL = `hc;     12'd357: toneL = `hc;
+                12'd358: toneL = `hc;     12'd359: toneL = `hc;
+                12'd360: toneL = `hc;     12'd361: toneL = `hc; // HF (half-beat)
+                12'd362: toneL = `hc;     12'd363: toneL = `hc;
+                12'd364: toneL = `hc;     12'd365: toneL = `hc;
+                12'd366: toneL = `hc;     12'd367: toneL = `hc;
+
+                12'd368: toneL = `hc;     12'd369: toneL = `hc; // HG (half-beat)
+                12'd370: toneL = `hc;     12'd371: toneL = `hc;
+                12'd372: toneL = `hc;     12'd373: toneL = `hc;
+                12'd374: toneL = `hc;     12'd375: toneL = `hc; // (Short break for repetitive notes: high D)
+                12'd376: toneL = `hc;     12'd377: toneL = `hc; // HG (half-beat)
+                12'd378: toneL = `hc;     12'd379: toneL = `hc;
+                12'd380: toneL = `hc;    12'd381: toneL = `hc;
+                12'd382: toneL = `hc;     12'd383: toneL = `hc; // (Short break for repetitive notes: high D)  
+
+                // --- Measure 7 ---
+                12'd384: toneL = `hc;      12'd385: toneL = `hc; // HG (half-beat)
+                12'd386: toneL = `hc;      12'd387: toneL = `hc;
+                12'd388: toneL = `hc;      12'd389: toneL = `hc;
+                12'd390: toneL = `hc;      12'd391: toneL = `hc;
+                12'd392: toneL = `hc;      12'd393: toneL = `hc; // HE (half-beat)
+                12'd394: toneL = `hc;      12'd395: toneL = `hc;
+                12'd396: toneL = `hc;      12'd397: toneL = `hc;
+                12'd398: toneL = `hc;      12'd399: toneL = `hc; // (Short break for repetitive notes: high E)
+
+                12'd400: toneL = `b;     12'd401: toneL = `b; // HE (one-beat)
+                12'd402: toneL = `b;     12'd403: toneL = `b;
+                12'd404: toneL = `b;     12'd405: toneL = `b;
+                12'd406: toneL = `b;     12'd407: toneL = `b;
+                12'd408: toneL = `b;     12'd409: toneL = `b;
+                12'd410: toneL = `b;     12'd411: toneL = `b;
+                12'd412: toneL = `b;     12'd413: toneL = `b;
+                12'd414: toneL = `b;     12'd415: toneL = `b;
+
+                12'd416: toneL = `a;     12'd417: toneL = `a; // HF (half-beat)
+                12'd418: toneL = `a;     12'd419: toneL = `a;
+                12'd420: toneL = `a;     12'd421: toneL = `a;
+                12'd422: toneL = `a;     12'd423: toneL = `a;
+                12'd424: toneL = `a;     12'd425: toneL = `a; // HD (half-beat)
+                12'd426: toneL = `a;     12'd427: toneL = `a;
+                12'd428: toneL = `a;     12'd429: toneL = `a;
+                12'd430: toneL = `a;     12'd431: toneL = `a; // (Short break for repetitive notes: high D)
+
+                12'd432: toneL = `g;     12'd433: toneL = `g; // HD (one-beat)
+                12'd434: toneL = `g;     12'd435: toneL = `g;
+                12'd436: toneL = `g;     12'd437: toneL = `g;
+                12'd438: toneL = `g;     12'd439: toneL = `g;
+                12'd440: toneL = `g;     12'd441: toneL = `g;
+                12'd442: toneL = `g;     12'd443: toneL = `g;
+                12'd444: toneL = `g;     12'd445: toneL = `g;
+                12'd446: toneL = `g;     12'd447: toneL = `g;   
+
+                // --- Measure 8 ---
+                12'd448: toneL = `a;     12'd449: toneL = `a; // HC (half-beat)
+                12'd450: toneL = `a;     12'd451: toneL = `a;
+                12'd452: toneL = `a;     12'd453: toneL = `a;
+                12'd454: toneL = `a;     12'd455: toneL = `a;
+                12'd456: toneL = `a;     12'd457: toneL = `a; // HE (half-beat)
+                12'd458: toneL = `a;     12'd459: toneL = `a;
+                12'd460: toneL = `a;     12'd461: toneL = `a;
+                12'd462: toneL = `a;     12'd463: toneL = `a;   
+
+                12'd464: toneL = `a;     12'd465: toneL = `a; // HG (half-beat)
+                12'd466: toneL = `a;     12'd467: toneL = `a;
+                12'd468: toneL = `a;     12'd469: toneL = `a;
+                12'd470: toneL = `a;     12'd471: toneL = `a; // (Short break for repetitive notes: high D)
+                12'd472: toneL = `a;     12'd473: toneL = `a; // HG (half-beat)
+                12'd474: toneL = `a;     12'd475: toneL = `a;
+                12'd476: toneL = `a;     12'd477: toneL = `a;
+                12'd478: toneL = `a;     12'd479: toneL = `sil; // (Short break for repetitive notes: high D)   
+
+                12'd480: toneL = `a;     12'd481: toneL = `a; // HC (half-beat)
+                12'd482: toneL = `a;     12'd483: toneL = `a;
+                12'd484: toneL = `a;     12'd485: toneL = `a;
+                12'd486: toneL = `a;     12'd487: toneL = `a; 
+                12'd488: toneL = `a;     12'd489: toneL = `a; // HC (half-beat)
+                12'd490: toneL = `a;     12'd491: toneL = `a;
+                12'd492: toneL = `a;     12'd493: toneL = `a;
+                12'd494: toneL = `a;     12'd495: toneL = `a;     
+
+                12'd496: toneL = `a;     12'd497: toneL = `a; // HC (half-beat)
+                12'd498: toneL = `a;     12'd499: toneL = `a;
+                12'd500: toneL = `a;     12'd501: toneL = `a;
+                12'd502: toneL = `a;     12'd503: toneL = `a; 
+                12'd504: toneL = `a;     12'd505: toneL = `a; // HC (half-beat)
+                12'd506: toneL = `a;     12'd507: toneL = `a;
+                12'd508: toneL = `a;     12'd509: toneL = `a;
+                12'd510: toneL = `a;     12'd511: toneL = `a;   
+
+                12'd512: toneL = `hd;    12'd513: toneL = `hd; // HG (one-beat)
+                12'd514: toneL = `hd;    12'd515: toneL = `hd;
+                12'd516: toneL = `hd;    12'd517: toneL = `hd;
+                12'd518: toneL = `hd;    12'd519: toneL = `hd;
+                12'd520: toneL = `hd;    12'd521: toneL = `hd;
+                12'd522: toneL = `hd;    12'd523: toneL = `hd;
+                12'd524: toneL = `hd;    12'd525: toneL = `hd;
+                12'd526: toneL = `hd;    12'd527: toneL = `hd;
+
+                12'd528: toneL = `he;      12'd529: toneL = `he; // HG (half-beat)
+                12'd530: toneL = `he;      12'd531: toneL = `he;
+                12'd532: toneL = `he;      12'd533: toneL = `he;
+                12'd534: toneL = `he;      12'd535: toneL = `he;
+                12'd536: toneL = `hc;      12'd537: toneL = `hc; // HE (half-beat)
+                12'd538: toneL = `hc;      12'd539: toneL = `hc;
+                12'd540: toneL = `hc;      12'd541: toneL = `hc;
+                12'd542: toneL = `hc;      12'd543: toneL = `hc; // (Short break for repetitive notes: high E)
+
+                12'd544: toneL = `hc;     12'd545: toneL = `hc; // HE (one-beat)
+                12'd546: toneL = `hc;     12'd547: toneL = `hc;
+                12'd548: toneL = `hc;     12'd549: toneL = `hc;
+                12'd550: toneL = `hc;     12'd551: toneL = `hc;
+                12'd552: toneL = `he;     12'd553: toneL = `he;
+                12'd554: toneL = `he;     12'd555: toneL = `he;
+                12'd556: toneL = `he;     12'd557: toneL = `he;
+                12'd558: toneL = `he;     12'd559: toneL = `he;
+
+                12'd560: toneL = `b;     12'd561: toneL = `b; // HF (half-beat)
+                12'd562: toneL = `b;     12'd563: toneL = `b;
+                12'd564: toneL = `b;     12'd565: toneL = `b;
+                12'd566: toneL = `b;     12'd567: toneL = `b;
+                12'd568: toneL = `b;     12'd569: toneL = `b; // HD (half-beat)
+                12'd570: toneL = `b;     12'd571: toneL = `b;
+                12'd572: toneL = `b;     12'd573: toneL = `b;
+                12'd574: toneL = `b;     12'd575: toneL = `b; // (Short break for repetitive notes: high D)
+
+                12'd576: toneL = `he;     12'd577: toneL = `he; // HD (one-beat)
+                12'd578: toneL = `he;     12'd579: toneL = `he;
+                12'd580: toneL = `he;     12'd581: toneL = `he;
+                12'd582: toneL = `he;     12'd583: toneL = `he;
+                12'd584: toneL = `a;     12'd585: toneL = `a;
+                12'd586: toneL = `a;     12'd587: toneL = `a;
+                12'd588: toneL = `a;     12'd589: toneL = `a;
+                12'd590: toneL = `a;     12'd591: toneL = `a;   
+
+                // --- Measure 4 ---
+                12'd592: toneL = `a;     12'd593: toneL = `a; // HC (half-beat)
+                12'd594: toneL = `a;     12'd595: toneL = `a;
+                12'd596: toneL = `a;     12'd597: toneL = `a;
+                12'd598: toneL = `a;     12'd599: toneL = `a;
+                12'd600: toneL = `he;     12'd601: toneL = `he; // HE (half-beat)
+                12'd602: toneL = `he;     12'd603: toneL = `he;
+                12'd604: toneL = `he;     12'd605: toneL = `he;
+                12'd606: toneL = `he;     12'd607: toneL = `he;   
+
+                12'd608: toneL = `hd;     12'd609: toneL = `hd; // HG (half-beat)
+                12'd610: toneL = `hd;     12'd611: toneL = `hd;
+                12'd612: toneL = `hd;     12'd613: toneL = `hd;
+                12'd614: toneL = `hd;     12'd615: toneL = `hd; // (Short break for repetitive notes: high D)
+                12'd616: toneL = `hd;     12'd617: toneL = `hd; // HG (half-beat)
+                12'd618: toneL = `hd;     12'd619: toneL = `hd;
+                12'd620: toneL = `hd;     12'd621: toneL = `hd;
+                12'd622: toneL = `hd;     12'd623: toneL = `hd; // (Short break for repetitive notes: high D)   
+
+                12'd624: toneL = `he;     12'd625: toneL = `he; // HE (one-beat)
+                12'd626: toneL = `he;     12'd627: toneL = `he;
+                12'd628: toneL = `he;     12'd629: toneL = `he;
+                12'd630: toneL = `he;     12'd631: toneL = `he;
+                12'd632: toneL = `hc;     12'd633: toneL = `hc;
+                12'd634: toneL = `hc;     12'd635: toneL = `hc;
+                12'd636: toneL = `hc;     12'd637: toneL = `hc;
+                12'd638: toneL = `hc;     12'd639: toneL = `hc;    
+
+                12'd640: toneL = `hc;     12'd641: toneL = `hc; // HE (one-beat)
+                12'd642: toneL = `hc;     12'd643: toneL = `hc;
+                12'd644: toneL = `hc;     12'd645: toneL = `hc;
+                12'd646: toneL = `hc;     12'd647: toneL = `hc;
+                12'd648: toneL = `he;     12'd649: toneL = `he;
+                12'd650: toneL = `he;     12'd651: toneL = `he;
+                12'd652: toneL = `he;     12'd653: toneL = `he;
+                12'd654: toneL = `he;     12'd655: toneL = `he; 
+
+                // --- Measure 5 ---
+                12'd656: toneL = `b;     12'd657: toneL = `b; // HD (one-beat)
+                12'd658: toneL = `b;     12'd659: toneL = `b;
+                12'd660: toneL = `b;     12'd661: toneL = `b;
+                12'd662: toneL = `b;     12'd663: toneL = `b;
+                12'd664: toneL = `b;     12'd665: toneL = `b;
+                12'd666: toneL = `b;     12'd667: toneL = `b;
+                12'd668: toneL = `b;     12'd669: toneL = `b;
+                12'd670: toneL = `b;     12'd671: toneL = `b;          
+
+                12'd672: toneL = `he;      12'd673: toneL = `he; // HD (one-beat)
+                12'd674: toneL = `he;      12'd675: toneL = `he;
+                12'd676: toneL = `he;      12'd677: toneL = `he;
+                12'd678: toneL = `he;      12'd679: toneL = `he;
+                12'd680: toneL = `he;      12'd681: toneL = `he;
+                12'd682: toneL = `he;      12'd683: toneL = `he;
+                12'd684: toneL = `he;      12'd685: toneL = `he;
+                12'd686: toneL = `he;      12'd687: toneL = `he;       
+
+                12'd688: toneL = `a;     12'd689: toneL = `a; // HD (half-beat)
+                12'd690: toneL = `a;     12'd691: toneL = `a;
+                12'd692: toneL = `a;     12'd693: toneL = `a;
+                12'd694: toneL = `a;     12'd695: toneL = `a;
+                12'd696: toneL = `a;     12'd697: toneL = `a; // HE (half-beat)
+                12'd698: toneL = `a;     12'd699: toneL = `a;
+                12'd700: toneL = `a;     12'd701: toneL = `a;
+                12'd702: toneL = `a;     12'd703: toneL = `a;       
+
+                12'd704: toneL = `a;     12'd705: toneL = `a; // HF (half-beat)
+                12'd706: toneL = `a;     12'd707: toneL = `a;
+                12'd708: toneL = `a;     12'd709: toneL = `a;
+                12'd710: toneL = `a;     12'd711: toneL = `a;
+                12'd712: toneL = `a;     12'd713: toneL = `a; 
+                12'd714: toneL = `a;     12'd715: toneL = `a;
+                12'd716: toneL = `a;     12'd717: toneL = `a;
+                12'd718: toneL = `a;     12'd719: toneL = `a;       
+
+                default: toneL = `sil;
+            endcase
+        end else begin 
+            toneL = `sil;
+        end
+    end
+
+endmodule
